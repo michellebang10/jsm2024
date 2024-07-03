@@ -43,7 +43,7 @@ R Code for JSM 2024 poster presentation.
 6) mean_count.tsv
    - For each allele, the mean transmission rate and the number of observations are listed.
 
-(All from spatial_graphs_for_paper.rmd)
+(All from spatial_graphs_cleaned.rmd)
 1) {allele}_basic.pdf
    - Bar graph of WT vs. GFP for all observations.
 2) {allele}_graphs.pdf
