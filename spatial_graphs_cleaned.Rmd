@@ -1,0 +1,286 @@
+---
+title: "Spatial Graphs for Paper"
+author: "Michelle Bang"
+date: "`r Sys.Date()`"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Part 0: Loading all of my files and functions
+
+
+```{r}
+#Load functions for spatial analysis. 
+source("../xml_to_coordinates.R") #Converts old hand-counted .xml files into coordinates. 
+source("../coordinates_to_xbins.R") #Converts coordinates into bins/sections. 
+source("../xml_to_coord_edited.R") #Converts NEW EarVision .xml files into coordinates. 
+```
+
+```{r}
+#Load neccessary libraries. 
+library(ggplot2)
+library(tidyverse)
+library(ggpubr)
+library(gridExtra)
+library(qvalue)
+library(scales)
+```
+
+```{r}
+#Function to change xml to coordinates depending on the file type. 
+xml_to_coord <- function(input_data_path){
+  if (grepl("\\_inference.xml", input_data_path)){ #Takes in EarVision files. 
+    xml_to_coordinates2(input_data_path)
+  } else{ #Takes in old hand-counted files. 
+    xml_to_coordinates(input_data_path) 
+  }
+}
+```
+
+```{r}
+list_alleles <- list.dirs("{insert path name to folders of .xml files}", full.names = FALSE, recursive = FALSE)
+```
+
+```{r}
+filenames = vector(mode='list', length= length(list_alleles))
+```
+
+```{r}
+for (i in 1:length(list_alleles)){
+  filenames[[i]] = vector(mode='list', length= 3)
+}
+```
+
+```{r}
+for (i in 1:length(list_alleles)){
+  filenames[[i]][[1]] <- list_alleles[[i]] #Getting name of allele
+  filenames[[i]][[2]] = list.files(paste0("{insert path name to folders of .xml files}", list_alleles[[i]]), pattern="*.xml", full.names=TRUE) #Getting path to observation.
+  filenames[[i]][[3]] = as.list(basename(filenames[[i]][[2]])) #Extracting the name of obs.
+}
+```
+
+
+```{r}
+for (n in 1:length(filenames)){
+  coords = lapply(filenames[[n]][[2]], xml_to_coord)
+  #Bar graph of WT vs. GFP for all observations.
+  pdf(file = paste("{insert pathname to where pdf should be saved}", filenames[[n]][[1]], "_basic.pdf", sep = ""),
+    width = 4,
+    height = 4,)
+
+  for (i in 1:length(filenames[[n]][[2]])) {
+    print(ggplot(data = coords[[i]], aes(x=type)) +
+        geom_bar()  +
+        ggtitle(filenames[[n]][[3]][[i]]) + 
+        theme(plot.title = element_text(hjust = 0.5)))
+  }
+  
+  dev.off()
+}
+
+```
+
+```{r}
+for (n in 1:length(filenames)){
+  coords = lapply(filenames[[n]][[2]], xml_to_coord)
+
+  #Removes faulty xml from the files. 
+
+  sequence = rev(seq(1:length(coords)))
+
+  #Checks if there will be an error when coordinates_to_xbins runs. If there is, it removes it from filenames 
+  for (i in sequence) {
+    if (nrow(coords[[i]]) == 0)  {
+      filenames[[n]][[2]] = filenames[[n]][[2]][-i]
+      filenames[[n]][[3]] = filenames[[n]][[3]][-i]
+    }
+  }
+  
+  #The 0 observation issue is caused by files that don't use 1 and 2 as their marker numbers which is a requirement for xml_to_coordinates
+  bin_data = lapply(coords, function(x) {coordinates_to_xbins(x,16)} )
+  
+  #Start chopping off the ends
+  sequence = seq(1,length(bin_data))
+  
+  #Creating an empty list
+  bin_ed = list()
+  
+  for (i in sequence) {
+      bin_ed[[i]] = data.frame("bins" = bin_data[[i]]$bins[2:15], "WT" = bin_data[[i]]$WT[2:15] , "GFP" = bin_data[[i]]$GFP[2:15])
+  }
+  
+  titleList <- filenames[[n]][[3]]
+  
+  pdf(file = paste("{insert pathname to where pdf should be saved}", filenames[[n]][[1]], "_graphs.pdf", sep = ""),
+    width = 4,
+    height = 4,)
+
+  for (i in 1:length(filenames[[n]][[2]])) {
+    final_df <- bin_ed[[i]]
+    #adding a column for bins 1-14 instead of numeric
+      bins1 = c(1,2,3,4,5,6,7,8,9,10,11,12,13,14)
+      final_df$bins <- bins1
+        
+         #ggplot of the WT with respect to x
+      print(ggplot(data = final_df, aes(x = bins, y = WT)) +
+            geom_col()  +
+            ggtitle(titleList[[i]]) +
+            ylim(0,15) +
+            theme(plot.title = element_text(hjust = 0.5)))
+       
+       #ggplot of the GFP with respect to x
+      print(ggplot(data = final_df, aes(x = bins, y = GFP)) +
+            geom_col()  +
+            ggtitle(titleList[[i]]) +
+            ylim(0,15) +
+            theme(plot.title = element_text(hjust = 0.5)))
+      
+      #adding in plot with both wt/gfp into one
+      test_long_df <- pivot_longer(final_df, 
+                                   col = c(2,3),
+                                   names_to = "type",
+                                   values_to = "value")
+      print(ggplot(data = test_long_df, aes(x = bins, y = value, fill = type)) +
+            #geom_col(position = "dodge2")  +
+            geom_col() +
+            ggtitle(titleList[[i]]) +
+            theme(plot.title = element_text(hjust = 0.5)) + coord_flip())
+  }
+  
+  dev.off()
+}
+```
+
+```{r}
+for (n in 1:length(filenames)){
+   coords = lapply(filenames[[n]][[2]], xml_to_coord)
+
+  #Removes faulty xml from the files. 
+
+  sequence = rev(seq(1:length(coords)))
+
+#Checks if there will be an error when coordinates_to_xbins runs. If there is, it removes it from filenames 
+for (i in sequence) {
+  if (nrow(coords[[i]]) == 0)  {
+    filenames[[n]][[2]] = filenames[[n]][[2]][-i]
+    filenames[[n]][[3]] = filenames[[n]][[3]][-i]
+  }
+}
+
+#The 0 observation issue is caused by files that don't use 1 and 2 as their marker numbers which is a requirement for xml_to_coordinates
+bin_data = lapply(coords, function(x) {coordinates_to_xbins(x,16)} )
+
+sequence = rev(seq(1:length(bin_data)))
+
+#Removes the files that break the glm, namely the ears with only one kind of kernel allele. At most removes the cases with very few WT or GFP which are by definition odd ears. 
+
+for (i in sequence) {
+  sumWT = sum(bin_data[[i]]$WT)
+  sumGFP = sum(bin_data[[i]]$GFP)
+    if ((sumWT < 5) | (sumGFP < 5)) {
+      bin_data = bin_data[-i]
+      filenames[[n]][[2]] = filenames[[n]][[2]][-i]
+      filenames[[n]][[3]] = filenames[[n]][[3]][-i]
+    }
+}
+
+#The 0 observation issue is caused by files that don't use 1 and 2 as their marker numbers which is a requirement for xml_to_coordinates
+full_data = lapply(coords, function(x) {coordinates_to_xbins(x,1)} )
+
+sequence = rev(seq(1:length(full_data)))
+
+#Removes the files that break the glm, namely the ears with only one kind of kernel allele. At most removes the cases with very few WT or GFP which are by definition odd ears. 
+
+for (i in sequence) {
+  sumWT = sum(full_data[[i]]$WT)
+  sumGFP = sum(full_data[[i]]$GFP)
+    if ((sumWT < 5) | (sumGFP < 5)) {
+      full_data = full_data[-i]
+    }
+}
+
+
+TransmissionRate <- c()
+for (i in 1:length(filenames[[n]][[2]])) {
+  TransmissionRate <- append(TransmissionRate, full_data[[i]]$GFP/(full_data[[i]]$GFP + full_data[[i]]$WT))
+}
+
+#Start chopping off the ends
+sequence = seq(1,length(bin_data))
+
+#Creating an empty list
+bin_ed = list()
+
+for (i in sequence) {
+    bin_ed[[i]] = data.frame("bins" = bin_data[[i]]$bins[2:15], "WT" = bin_data[[i]]$WT[2:15] , "GFP" = bin_data[[i]]$GFP[2:15])
+}
+
+#turn the data into a glm
+ends_glm_data = lapply(bin_ed, function(x) {glm(cbind(GFP,WT) ~ bins,family = quasibinomial(link = "logit"), data = x)})
+
+
+#extract the p values
+ends_pv_data = lapply(ends_glm_data, function(x) {(summary(x)$coefficients)})
+
+ends_p_data = lapply(ends_pv_data, function(x) {x[8]})
+
+#comment this out to look at the non adjusted values, you can swap the method by changing 'method = fdr'
+adj_p_data = p.adjust(ends_p_data, method = "fdr")
+
+adj_p_df <- data.frame(matrix(unlist(adj_p_data), nrow=length(adj_p_data), byrow=T))
+names(adj_p_df)[names(adj_p_df) == colnames(adj_p_df[1])] = "adj_p_value"
+
+ends_p_df <- data.frame(matrix(unlist(ends_p_data), nrow=length(ends_p_data), byrow=T))
+names(ends_p_df)[names(ends_p_df) == colnames(ends_p_df[1])] = "p_value"
+
+tester <- data.frame(bin_ed[1]) %>%
+  mutate(rate = GFP/(WT + GFP))
+bin_w_trate_ed = list(tester)
+for(i in 2:length(full_data)) {
+  tester <- data.frame(bin_ed[i]) %>%
+    mutate(rate = GFP/(WT + GFP)) %>%
+    mutate(rate = if_else(is.na(rate), 0, rate)) #this is not working?? so extra check down below
+  test = list(tester)
+  bin_w_trate_ed = append(bin_w_trate_ed, test)
+}
+
+for(i in 1:length(bin_ed)) {
+  bin_w_trate_ed[[i]] <- bin_w_trate_ed[[i]] %>%
+    mutate(rate = if_else(is.na(rate), 0, rate))
+}
+
+titleList <- filenames[[n]][[3]]
+
+pdf(file = paste("{insert pathname to where pdf should be saved}", filenames[[n]][[1]], "_xcoordsbytr_linear_ends.pdf", sep = ""),
+    width = 4,
+    height = 4,)
+#Scatterplot of transmission rate vs. bins/x-coord with linear line fitted.
+for (i in 1:length(bin_ed)) {
+  print(ggplot(data = bin_w_trate_ed[[i]], aes(x=bins, y = rate)) +
+          geom_smooth(method="lm") +
+          geom_point() +
+          ggtitle(titleList[[i]]) + 
+          theme(plot.title = element_text(hjust = 0.5)) +
+          labs(x = "Bins/X-coord", y = "Transmission Rate"))
+}
+dev.off()
+
+pdf(file = paste("{insert pathname to where pdf should be saved}", filenames[[n]][[1]], "_xcoordsbytr_quad_ends.pdf", sep = ""),
+    width = 4,
+    height = 4,)
+#Scatterplot of transmission rate vs. bins/x-coord with quadratic line fitted.
+for (i in 1:length(bin_ed)) {
+  print(ggplot(data = bin_w_trate_ed[[i]], aes(x=bins, y = rate)) +
+          geom_smooth(method="lm", formula = y~poly(x,2)) +
+          geom_point() +
+          ggtitle(titleList[[i]]) + 
+          theme(plot.title = element_text(hjust = 0.5)) +
+          labs(x = "Bins/X-coord", y = "Transmission Rate") )
+}
+dev.off()
+}
+```
+
