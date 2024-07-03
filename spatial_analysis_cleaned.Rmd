@@ -1,0 +1,484 @@
+---
+title: "Spatial Analysis for Paper (Cleaned Version)"
+author: "Michelle Bang"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Part 0: Loading all of my files and functions
+
+```{r}
+#Load functions for spatial analysis. 
+source("../xml_to_coordinates.R") #Converts old hand-counted .xml files into coordinates. 
+source("../coordinates_to_xbins.R") #Converts coordinates into bins/sections. 
+source("../xml_to_coord_edited.R") #Converts NEW EarVision .xml files into coordinates. 
+```
+
+```{r}
+#Load necessary libraries. 
+library(ggplot2)
+library(tidyverse)
+library(ggpubr)
+library(qvalue)
+library(scales)
+```
+
+```{r}
+#Function to change xml to coordinates depending on the file type. 
+xml_to_coord <- function(input_data_path){
+  #print(input_data_path)
+  if (grepl("\\_inference.xml", input_data_path)){ #Takes in EarVision files. 
+    xml_to_coordinates2(input_data_path)
+  } else{ #Takes in old hand-counted files. 
+    xml_to_coordinates(input_data_path) 
+  }
+}
+```
+
+```{r}
+#Getting the all the .xml files. Divided into folders depending on the allele.
+list_alleles <- list.dirs("{insert path to folders of .xml files}", full.names = FALSE, recursive = FALSE)
+```
+
+```{r}
+#Creating a list that is separated by allele/folder.
+filenames = vector(mode='list', length= length(list_alleles))
+```
+
+```{r}
+#Making each list element hold a list of 3 elements. 
+for (i in 1:length(list_alleles)){
+  filenames[[i]] = vector(mode='list', length= 3)
+}
+```
+
+```{r}
+for (i in 1:length(list_alleles)){
+  #Getting name of allele
+  filenames[[i]][[1]] <- list_alleles[[i]] 
+  #Getting path to observation.
+  filenames[[i]][[2]] = list.files(paste0("{insert path to folders of .xml files}", list_alleles[[i]]), pattern="*.xml", full.names=TRUE) 
+  #Extracting the name of observation.
+  filenames[[i]][[3]] = as.list(basename(filenames[[i]][[2]])) 
+}
+```
+
+```{r}
+#Create data frame for summary statistics regarding p-values.
+truePVal = data.frame(matrix(nrow = length(filenames), ncol = 13)) 
+colnames(truePVal) <- c("Allele", "True Prop", "Lin Prop", "Quad Prop", "Lin Prop Count", "Quad Prop Count", "Adj P-Val Prop (< .1)", "Adj P-Val (< .1) from Lin", "Adj P-Val (<.1) from Quad", "Total Count", "SE", "Lower 90% CI", "Upper 90% CI")
+truePVal[1] = list_alleles
+```
+
+```{r}
+#Create mega dataframe to contain information for all n alleles.
+megaDf = data.frame()
+anova_comp_full = data.frame()
+megaBestDf = data.frame()
+```
+
+```{r}
+#Create data frame for summary statistics regarding coefficients. 
+stat_sum = data.frame(matrix(nrow = length(filenames), ncol = 7)) 
+colnames(stat_sum) <- c("Allele", "Lin Coef", "Lin SE", "Lin Var", "Quad Coef", "Quad SE", "Quad Var")
+stat_sum[1] = list_alleles
+```
+
+```{r}
+#Main code looped for n alleles. 
+
+for (n in 1:length(filenames)){
+  coords = lapply(filenames[[n]][[2]], xml_to_coord)
+
+  #Removes faulty xml from the files. 
+
+  sequence = rev(seq(1:length(coords)))
+
+#Checks if there will be an error when coordinates_to_xbins runs. If there is, it removes it from filenames.
+for (i in sequence) {
+  if (nrow(coords[[i]]) == 0)  {
+    filenames[[n]][[2]] = filenames[[n]][[2]][-i]
+    filenames[[n]][[3]] = filenames[[n]][[3]][-i]
+  }
+}
+
+#The 0 observation issue is caused by files that don't use 1 and 2 as their marker numbers which is a requirement for xml_to_coordinates.
+bin_data = lapply(coords, function(x) {coordinates_to_xbins(x,16)} )
+
+sequence = rev(seq(1:length(bin_data)))
+
+#Removes the files that break the glm, namely the ears with only one kind of kernel allele. At most removes the cases with very few WT or GFP which are by definition odd ears. 
+
+for (i in sequence) {
+  sumWT = sum(bin_data[[i]]$WT)
+  sumGFP = sum(bin_data[[i]]$GFP)
+    if ((sumWT < 5) | (sumGFP < 5)) {
+      bin_data = bin_data[-i]
+      filenames[[n]][[2]] = filenames[[n]][[2]][-i]
+      filenames[[n]][[3]] = filenames[[n]][[3]][-i]
+    }
+}
+
+#The 0 observation issue is caused by files that don't use 1 and 2 as their marker numbers which is a requirement for xml_to_coordinates.
+full_data = lapply(coords, function(x) {coordinates_to_xbins(x,1)} )
+
+sequence = rev(seq(1:length(full_data)))
+
+#Removes the files that break the glm, namely the ears with only one kind of kernel allele. At most removes the cases with very few WT or GFP which are by definition odd ears. 
+
+for (i in sequence) {
+  sumWT = sum(full_data[[i]]$WT)
+  sumGFP = sum(full_data[[i]]$GFP)
+    if ((sumWT < 5) | (sumGFP < 5)) {
+      full_data = full_data[-i]
+    }
+}
+
+
+TransmissionRate <- c()
+for (i in 1:length(filenames[[n]][[2]])) {
+  TransmissionRate <- append(TransmissionRate, full_data[[i]]$GFP/(full_data[[i]]$GFP + full_data[[i]]$WT))
+}
+
+#Start chopping off the ends.
+sequence = seq(1,length(bin_data))
+
+#Creating an empty list.
+bin_ed = list()
+
+for (i in sequence) {
+    bin_ed[[i]] = data.frame("bins" = bin_data[[i]]$bins[2:15], "WT" = bin_data[[i]]$WT[2:15] , "GFP" = bin_data[[i]]$GFP[2:15])
+}
+
+#Turn the data into a glm.
+ends_glm_data = lapply(bin_ed, function(x) {glm(cbind(GFP,WT) ~ bins,family = quasibinomial(link = "logit"), data = x)})
+
+
+#Extract the p values.
+ends_pv_data = lapply(ends_glm_data, function(x) {(summary(x)$coefficients)})
+
+ends_p_data = lapply(ends_pv_data, function(x) {x[8]})
+
+#Comment this out to look at the non adjusted values, you can swap the method by changing 'method = fdr'.
+adj_p_data = p.adjust(ends_p_data,method = "fdr")
+
+adj_p_df <- data.frame(matrix(unlist(adj_p_data), nrow=length(adj_p_data), byrow=T))
+names(adj_p_df)[names(adj_p_df) == colnames(adj_p_df[1])] = "adj_p_value"
+
+ends_p_df <- data.frame(matrix(unlist(ends_p_data), nrow=length(ends_p_data), byrow=T))
+names(ends_p_df)[names(ends_p_df) == colnames(ends_p_df[1])] = "p_value"
+
+titleDf <- data.frame(unlist(filenames[[n]][[3]]))
+colnames(titleDf) <- "Name"
+
+endsfullDf = cbind(titleDf, ends_p_df)
+endsfullDf <- cbind(endsfullDf, TransmissionRate)
+endsfullDf <- cbind(endsfullDf, adj_p_df)
+
+endsfullDf <- endsfullDf %>%
+  mutate(allele = filenames[[n]][[1]])
+
+#Uncomment to save data for just linear term as .tsv
+#endsfullDf1 = as.matrix(endsfullDf)
+#write.table(endsfullDf1, file = paste0(filenames[[n]][[1]],"_glm_ends.tsv"), sep = "\t", row.names=FALSE) 
+
+# TEST FOR PROP OF TRUE NULL P-VALUES
+
+#Another way of accounting for multiple testing
+#Should give out percentage of null p-values (we are interested in 1-nullper).
+
+min_p = min(unlist(ends_p_data)) + .05
+per_adj_p_data = pi0est(unlist(ends_p_data), lambda = seq(min_p, .5, length.out=10), pi0.method = "bootstrap")
+trueProp = 1-per_adj_p_data$pi0
+truePVal[n,3] = trueProp
+
+
+#ANOVA Testing for quadratic term
+
+#First part of set up should be the same as GLM with ends chopped off.
+
+
+bins_squared_ends = bin_ed
+bin_sq_data_ends = bin_ed
+
+sequence = seq(1, length(bin_ed))
+sequence2  = seq(1, 14)
+
+for (i in sequence) {
+  for (j in sequence2) {
+  bins_squared_ends[[i]]$bins[j] = (bin_sq_data_ends[[i]]$bins[j])^2
+  }
+  bin_sq_data_ends[[i]] = data.frame(bin_sq_data_ends[[i]],bins_squared_ends[[i]]$bins)
+}
+
+#Turn the data into a glm
+#If this breaks just double check how R is naming the bin_squared column of bin_data and replace "bins_squared..i...bins" with that.
+sq_glm_data_ends = lapply(bin_sq_data_ends, function(x) {glm(cbind(GFP,WT) ~ bins + bins_squared_ends..i...bins,family = quasibinomial(link = "logit"), data = x)})
+
+#Creating null model.
+null_ends_model <- lapply(bin_ed, function(x) {glm(cbind(GFP,WT) ~ 1,family = quasibinomial(link = "logit"), data = x)})
+
+
+#Setting up empty list.
+anova_ends_data <- vector(length = length(bin_ed))
+
+for (i in 1:length(bin_ed)){
+  anova_ends_data[i] <- anova(null_ends_model[[i]], sq_glm_data_ends[[i]], test = "F")$"Pr(>F)"[2]
+}
+
+anova_ends_df <- as.data.frame(anova_ends_data)
+row.names(anova_ends_df) <- 1:length(bin_ed)
+adj_anova = p.adjust(anova_ends_data, method = "fdr")
+colnames(anova_ends_df)[1] = "p_value_sq"
+#Uncomment for when you want to add column for names.
+#anova_ends_df <- cbind(anova_ends_df, titleDf)
+#colnames(anova_ends_df)[2] = "name"
+anova_ends_df <- cbind(anova_ends_df, adj_anova)
+colnames(anova_ends_df)[2] = "adj_p_value_sq"
+
+#Uncomment if you want to save just ANOVA data as .tsv
+#write.table(anova_ends_df, file = paste0(filenames[[n]][[1]],"_anova_ends.tsv"), sep = "\t", row.names=FALSE) 
+
+# TEST FOR PROP OF TRUE NULL P-VALUES
+
+#Another way of accounting for multiple testing.
+#Should give out percentage of null p-values (we are interested in 1-nullper).
+min_p = min(unlist(anova_ends_data)) + .05
+per_adj_anova = pi0est(unlist(anova_ends_data), lambda = seq(min_p, .5, length.out = 10), pi0.method = "bootstrap")
+truePropA = 1-per_adj_anova$pi0
+truePVal[n,4] = truePropA
+
+endsfullDf <- cbind(endsfullDf, anova_ends_df)
+
+#Saving all data as .tsv.
+megaDf <- rbind(megaDf, endsfullDf)
+
+
+#Creating a summary of the coefficients found from the GLM. 
+coef_ends_glm <- c()
+for(k in 1:length(ends_glm_data)){
+  coef_ends_glm <- append(coef_ends_glm, ends_glm_data[[k]]$coefficients[["bins"]])
+}
+stat_sum[n,2] = mean(coef_ends_glm) 
+
+se_ends <- c()
+for(k in 1:length(ends_glm_data)){
+  se_ends <- append(se_ends, summary(ends_glm_data[[k]])$coefficients[, 2][["bins"]])
+}
+se_ends_new <- se_ends^2
+stat_sum[n,3] = sqrt(sum(se_ends_new)/length(ends_glm_data)^2) 
+
+stat_sum[n,4] = var(coef_ends_glm)
+
+coef_ends_sq_glm <- c()
+
+for(k in 1:length(sq_glm_data_ends)){
+  coef_ends_sq_glm <- append(coef_ends_sq_glm, sq_glm_data_ends[[k]]$coefficients[["bins_squared_ends..i...bins"]])
+}
+stat_sum[n,5] = mean(coef_ends_sq_glm)
+
+se_sq_ends <- c()
+for(k in 1:length(sq_glm_data_ends)){
+  se_sq_ends <- append(se_sq_ends, summary(sq_glm_data_ends[[k]])$coefficients[, 2][["bins"]])
+}
+se_sq_ends_new <- se_sq_ends^2
+stat_sum[n,6] = sqrt(sum(se_sq_ends_new)/length(sq_glm_data_ends)^2) 
+
+stat_sum[n,7] = var(coef_ends_sq_glm)
+
+
+#Model comparison between the linear and quadratic model. 
+anova_comparison <- vector(length = length(bin_ed))
+
+for (i in 1:length(bin_ed)){
+  anova_comparison[i] <- anova(ends_glm_data[[i]], sq_glm_data_ends[[i]], test = "F")$"Pr(>F)"[2]
+}
+
+anova_comp_df <- as.data.frame(anova_comparison)
+row.names(anova_comp_df) <- 1:length(bin_ed)
+adj_anova_comp = p.adjust(anova_comparison, method = "fdr")
+colnames(anova_comp_df)[1] = "p_value"
+anova_comp_df <- cbind(anova_comp_df, adj_anova_comp)
+colnames(anova_comp_df)[2] = "adj_p_value"
+anova_comp_df <- anova_comp_df %>%
+  mutate(allele = filenames[[n]][[1]])
+
+anova_comp_full <- rbind(anova_comp_full, anova_comp_df)
+
+#Choosing only one p-value for pi0est based on model comparison test. 
+pi0est_p_vals <- data.frame(matrix(nrow = length(bin_ed), ncol = 1)) 
+best_df <- data.frame(matrix(nrow = length(bin_ed), ncol = 8))
+colnames(best_df) <- c("Allele", "Name", "P_Value", "Model", "Adj_P_Value", "Lin_Coef", "Quad_Coef", "Inc_Dec")
+best_df[1] = filenames[[n]][[1]]
+best_df[2] = titleDf
+
+quad_count = 0
+lin_count = 0
+
+for (i in 1:length(bin_ed)) {
+  if (anova_comp_df[[1]][[i]] > .1) {
+    pi0est_p_vals[[1]][[i]] = ends_p_df[[1]][[i]]
+    best_df[[3]][[i]] = ends_p_df[[1]][[i]]
+    best_df[[4]][[i]] = "L"
+    best_df[[5]][[i]] = adj_p_df[[1]][[i]]
+    lin_count = lin_count + 1
+    #Getting coefficient of GLM. 
+    best_df[[6]][[i]] = coef_ends_glm[[i]]
+    best_df[[7]][[i]] = "NA"
+  } else {
+    pi0est_p_vals[[1]][[i]] = anova_ends_df[[1]][[i]]
+    best_df[[3]][[i]] = anova_ends_df[[1]][[i]]
+    best_df[[4]][[i]] = "Q"
+    best_df[[5]][[i]] = adj_anova[[1]][[i]]
+    quad_count = quad_count + 1
+    #Getting Coefficient of GLM. 
+    best_df[[6]][[i]] = coef_ends_glm[[i]]
+    best_df[[7]][[i]] = coef_ends_sq_glm[[i]]
+  }
+}
+
+
+min_p = min(unlist(pi0est_p_vals)) + .05 #Getting the minimum p-value to set as the minimum lambda value for the following function. 
+per_adj_p_data = pi0est(unlist(pi0est_p_vals), lambda = seq(min_p, .5, length.out=10), pi0.method = "bootstrap")
+trueProp = 1-per_adj_p_data$pi0
+nullProp = per_adj_p_data$pi0
+pi_lamba = per_adj_p_data$pi0.lambda
+lambda = per_adj_p_data$lambda
+l = 0
+for (i in 1:length(lambda)) {
+  if (nullProp == pi_lamba[i]) {
+    l = lambda[i]
+    break
+  }
+}
+truePVal[n,2] = trueProp
+truePVal[n,5] = lin_count
+truePVal[n,6] = quad_count
+m = lin_count + quad_count
+SE <- sqrt((nullProp * (1-nullProp*(1-l)))/(m*(1-l)))
+truePVal[n,11] = SE
+truePVal[n,12] = trueProp - 1.645*SE
+truePVal[n,13] = trueProp + 1.645*SE
+
+#Getting proportion of adj p-values below .1 for all alleles. 
+adj_p_comp = p.adjust(unlist(pi0est_p_vals), method = "fdr")
+adj_p_comp_df <- data.frame(matrix(unlist(adj_p_comp), nrow=length(adj_p_comp), byrow=T))
+names(adj_p_comp_df)[names(adj_p_comp_df) == colnames(adj_p_comp_df[1])] = "adj_p_value"
+
+best_df[[5]] = adj_p_comp
+
+adj_cnt <- adj_p_comp_df %>%
+  filter(adj_p_value < .1) %>%
+  summarize(count = n())
+
+adj_l_cnt <- best_df %>%
+  filter(Adj_P_Value < .1, Model == "L") %>%
+  summarize(count = n())
+
+adj_q_cnt <- best_df %>%
+  filter(Adj_P_Value < .1, Model == "Q") %>%
+  summarize(count = n())
+
+truePVal[n,7] = adj_cnt[[1]][[1]]/(lin_count + quad_count)
+
+truePVal[n,8] = adj_l_cnt[[1]][[1]]
+
+truePVal[n,9] = adj_q_cnt[[1]][[1]]
+
+#total count
+truePVal[n,10] = lin_count + quad_count
+
+#Looking at the specific ears with small adj p-values, check if the trend is increasing or decreasing.
+for (i in 1:length(bin_ed)) {
+  if (best_df[[5]][[i]] < .1) {
+    if (best_df[[4]][[i]] == "L") {
+      if (best_df[[6]][[i]] > 0) {
+        best_df[[8]][[i]] = "I"
+      } else {
+        best_df[[8]][[i]] = "D"
+      }
+    } else {
+      best_df[[8]][[i]] = "Check"
+    }
+  } else {
+    best_df[[8]][[i]] = "NA"
+  }
+}
+
+megaBestDf <- rbind(megaBestDf, best_df)
+}
+
+```
+
+
+```{r}
+#write.table(truePVal, file = "prop_true_pval_v052324.tsv", sep = "\t", row.names=FALSE) 
+```
+
+```{r}
+#write.table(megaBestDf, file = "incr_decr_v052324.tsv", sep = "\t", row.names=FALSE) 
+```
+
+```{r}
+#Checking which observations are significant for quad model. 
+megaBestDf %>%
+  filter(Inc_Dec == "Check")
+```
+
+```{r}
+#Filtering out significant observations. 
+sig_obs <- megaBestDf %>%
+  filter(Inc_Dec != "NA")
+```
+
+```{r}
+#write.table(sig_obs, file = "significant_observations_v052324.tsv", sep = "\t", row.names=FALSE)
+```
+
+```{r}
+#write.table(megaDf, file = "spatial_analysis_for_paper_v052324.tsv", sep = "\t", row.names=FALSE)
+```
+
+```{r}
+new_df <- read.table(file = "spatial_analysis_for_paper_v052324.tsv",
+                              header = TRUE,
+                              sep = '\t', na.strings = c("", " ", NA))
+```
+
+
+```{r}
+#Creating table for mean transmission rate and observation count for each allele. 
+mean_count <- new_df %>%
+  group_by(allele) %>%
+  summarize(mean_rate = mean(TransmissionRate),
+            count = n()) %>%
+  arrange(desc(mean_rate))
+```
+
+```{r}
+#write.table(mean_count, file = "mean_count_paper_v052324.tsv", sep = "\t", row.names=FALSE)
+```
+
+```{r}
+#Creating summary table for the model comparisons between linear model and quadratic model. 
+anova_comp <- anova_comp_full %>%
+  group_by(allele) %>%
+  summarize(mean_p = mean(p_value), 
+            var_p = var(p_value),
+            max_p = max(p_value),
+            min_p = min(p_value), 
+            mean_adj = mean(adj_p_value),
+            )
+```
+
+```{r}
+#write.table(anova_comp, file = "anova_comp_paper.tsv", sep = "\t", row.names=FALSE)
+```
+
+```{r}
+#write.table(anova_comp_full, file = "anova_comp_full_paper.tsv", sep = "\t", row.names=FALSE)
+```
